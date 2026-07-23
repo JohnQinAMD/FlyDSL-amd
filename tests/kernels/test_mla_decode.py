@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import logging
+import math
 import os
 import statistics
 import sys
@@ -36,7 +37,7 @@ try:
     from aiter.ops.attention import (  # noqa: E402  # pyright: ignore[reportMissingImports]
         get_mla_metadata_info_v1,
         get_mla_metadata_v1,
-        hk_mla_decode_fwd,
+        hk_mla_v40_decode_fwd as hk_mla_decode_fwd,
         mla_decode_stage1_asm_fwd,
         mla_reduce_v1,
     )
@@ -194,7 +195,15 @@ def run_single(
     bench_repeats=DEFAULT_BENCH_REPEATS,
     seed=DEFAULT_SEED,
     bench_aiter=False,
+    raise_on_mismatch=True,
 ):
+    """Run the FlyDSL MLA decode at one shape.
+
+    Returns a metrics dict {cos_diff, snr_db, us, err_ratio}. ``raise_on_mismatch``
+    (default True, preserving the pytest/CLI contract) asserts cos_diff<3e-2; a
+    non-raising caller (e.g. the KernelForge run driver) gets the metrics back and
+    decides pass/fail itself.
+    """
     torch.manual_seed(seed + batch_size * 1000003 + ctx_len * 9176 + decode_qlen)
 
     nhead = NHEAD
@@ -398,6 +407,11 @@ def run_single(
     # Cosine similarity check
     x, y = out_ref.double(), out_asm.double()
     cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
+    # SNR (dB) vs the golden reference — the standard correctness signal the
+    # KernelForge test tool parses ("SNR: <db> dB").
+    _noise = (x - y).norm().item()
+    _signal = x.norm().item()
+    snr_db = 20.0 * math.log10(_signal / _noise) if _noise > 0 else 999.0
 
     flops = decode_qlen * total_kv * nhead * (QK_HEAD_DIM + V_HEAD_DIM) * 2
     bw = (
@@ -411,7 +425,8 @@ def run_single(
         f"TB/s={bw / us / 1e6:.2f}  err_ratio={err:.2%}  "
         f"us_p50={us:.2f}  us_range=[{bench_stats['min_us']:.2f}, {bench_stats['max_us']:.2f}]"
     )
-    assert cos_diff < 3e-2, f"cos_diff={cos_diff} exceeds threshold"
+    if raise_on_mismatch:
+        assert cos_diff < 3e-2, f"cos_diff={cos_diff} exceeds threshold"
 
     if bench_aiter:
         aiter_hk_out = torch.empty_like(out_asm).fill_(-1)
@@ -474,7 +489,7 @@ def run_single(
             aiter_asm_logits,
             aiter_asm_lse,
         )
-    return err, us
+    return {"cos_diff": cos_diff, "snr_db": snr_db, "us": us, "err_ratio": err}
 
 
 # -- pytest ------------------------------------------------------
