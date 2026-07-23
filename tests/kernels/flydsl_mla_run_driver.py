@@ -35,15 +35,40 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, _REPO)
 
 _CACHE_DIR = os.environ.get("FLYDSL_RUNTIME_CACHE_DIR", "/root/.flydsl")
+# The kernel this driver scores (override for other kernels, e.g. prefill).
+_KERNEL = os.environ.get(
+    "FORGE_FLYDSL_KERNEL",
+    os.path.join(_REPO, "kernels/attention/mla_fwd_decode_m16x8_fp8_fp8.py"),
+)
+_STAMP = os.path.join(_CACHE_DIR, ".driver_kernel_mtime")
 
 
 def _clear_flydsl_cache() -> None:
-    """Defeat FlyDSL's env/seqlen-blind build cache before each measurement."""
+    """Clear FlyDSL's env/seqlen-blind build cache — but ONLY when the kernel
+    source changed since the last call. Clearing on EVERY call forces a full JIT
+    recompile per correctness/perf invocation, which blows past the MCP test/bench
+    tool timeouts (the fellow then sees empty results). mtime-gating keeps the
+    cache-hazard fix (a stale kernel never survives an edit) while letting repeated
+    calls on the SAME kernel reuse the compiled artifact."""
     try:
+        kmt = os.path.getmtime(_KERNEL) if os.path.exists(_KERNEL) else 0.0
+        prev = None
+        if os.path.exists(_STAMP):
+            try:
+                prev = float(open(_STAMP).read().strip() or 0)
+            except Exception:
+                prev = None
+        if prev is not None and abs(prev - kmt) < 1e-6:
+            return  # kernel unchanged -> keep the JIT cache (no recompile)
         if os.path.isdir(_CACHE_DIR):
             for name in os.listdir(_CACHE_DIR):
+                if name == os.path.basename(_STAMP):
+                    continue
                 p = os.path.join(_CACHE_DIR, name)
                 shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        with open(_STAMP, "w") as f:
+            f.write(repr(kmt))
     except Exception:
         pass
 
