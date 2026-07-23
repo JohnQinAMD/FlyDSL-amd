@@ -600,6 +600,28 @@ def ds_bpermute(res, index, src, **kw):
 
 
 @dsl_loc_tracing
+def permlane16_swap(res, old, src, fi=False, bound_control=False, **kw):
+    """gfx950 ``v_permlane16_swap_b32``: swap 32-bit lane values across the 16-lane
+    boundary between ``old`` and ``src`` IN-REGISTER (no LDS). ``res`` is the result
+    type (the op yields the two swapped lane values). Used for in-register transpose
+    and cross-wave softmax combine (the last-mile ASM technique, LDS-free)."""
+    from ..._mlir.dialects.rocdl import permlane16_swap as _op
+
+    return _op(res=res, old=_to_ir(old), src=_to_ir(src),
+               fi=_to_ir(fi), bound_control=_to_ir(bound_control), **kw)
+
+
+@dsl_loc_tracing
+def permlane32_swap(res, old, src, fi=False, bound_control=False, **kw):
+    """gfx950 ``v_permlane32_swap_b32``: swap 32-bit lane values across the 32-lane
+    boundary between ``old`` and ``src`` in-register (no LDS). See permlane16_swap."""
+    from ..._mlir.dialects.rocdl import permlane32_swap as _op
+
+    return _op(res=res, old=_to_ir(old), src=_to_ir(src),
+               fi=_to_ir(fi), bound_control=_to_ir(bound_control), **kw)
+
+
+@dsl_loc_tracing
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
 
