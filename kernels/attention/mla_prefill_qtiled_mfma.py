@@ -37,13 +37,13 @@ V_HEAD_DIM = 512
 NUM_QO_HEADS = 128
 
 # Tile config (coupled: BM x BN x gemm2-contract). Overridable via env for
-# bounded rechecks; BM64/BN32 is the long-context winner.  The exact BM32/BN32
+# bounded rechecks; BM64/BN64 is the long-context winner.  The exact BM32/BN32
 # occupancy-2 kernel remains banked in mla_prefill_qtiled_mfma.py.best.
 BLOCK_M = int(os.environ.get("FLYDSL_MLA_BM", "64"))
-# BN=32 keeps the BM64 tile within the 160-KiB CU LDS limit (115,584 B) and is
-# materially faster than BN64/96.  BM64 deliberately uses occupancy 1: its
-# extra query reuse wins at S>=8192 while remaining inside the short-shape gate.
-BLOCK_N = int(os.environ.get("FLYDSL_MLA_BN", "32"))
+# BN64 halves steady KV-loop/barrier count.  The register-O lifetime overlay
+# below reuses the dead KV backing for the epilogue output landing, reducing
+# this configuration from an illegal disjoint allocation to 99,456 B LDS.
+BLOCK_N = int(os.environ.get("FLYDSL_MLA_BN", "64"))
 BLOCK_THREADS = 256
 LOG2E = 1.4426950408889634
 
@@ -91,7 +91,7 @@ _POST_MISCHED_ENV = os.environ.get("FLYDSL_MLA_POSTMISCHED", "auto")
 
 def _post_misched(bm):
     if _POST_MISCHED_ENV == "auto":
-        return bm < 64
+        return bm < 64 or (bm == 64 and BLOCK_N >= 64)
     return _POST_MISCHED_ENV not in ("0", "false", "False")
 
 
@@ -139,12 +139,35 @@ def _make_shared(bm, bn):
     return SharedStorage
 
 
+def _make_shared_rego_overlay(bm, bn):
+    """REGO storage with the dead KV backing reused for the output landing.
+
+    The KV tile is live only in the online-attention loop; register-resident O
+    lands in LDS only after that loop.  One max(K, O) allocation therefore
+    replaces the two disjoint regions and makes the structural BN64 tile legal.
+    """
+    kv_o_elems = max(bn * K_STRIDE, bm * V_HEAD_DIM)
+
+    @fx.struct
+    class SharedStorage:
+        kv_o_lds: fx.Array[fx.BFloat16, kv_o_elems, 16]
+        s_lds: fx.Array[fx.Float32, bm * bn, 16]
+        p_lds: fx.Array[fx.BFloat16, bm * bn, 16]
+        m_lds: fx.Array[fx.Float32, bm, 16]
+        l_lds: fx.Array[fx.Float32, bm, 16]
+        corr_lds: fx.Array[fx.Float32, bm, 16]
+        corr_bf_lds: fx.Array[fx.BFloat16, bm, 16]
+        phys_lds: fx.Array[fx.Int32, bn, 16]
+
+    return SharedStorage
+
+
 def _build_rego(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
     CAUSAL = bool(is_causal)
     BM = int(bm)
     BN = int(bn)
     HG = NUM_QO_HEADS // BM
-    SS = _make_shared(BM, BN)
+    SS = _make_shared_rego_overlay(BM, BN)
     GATHER_PER_THR = (BN * QK_HEAD_DIM + BLOCK_THREADS - 1) // BLOCK_THREADS
     GATHER_VEC = 8
     assert QK_HEAD_DIM % GATHER_VEC == 0 and V_HEAD_DIM % GATHER_VEC == 0
@@ -153,8 +176,8 @@ def _build_rego(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
     GATHER_VEC_ITERS = (GATHER_VEC_GROUPS + BLOCK_THREADS - 1) // BLOCK_THREADS
     O_ELEMS = BM * V_HEAD_DIM
     O_PER_THR = O_ELEMS // BLOCK_THREADS
-    PV_CHUNKS = int(os.environ.get("FLYDSL_MLA_PVC", "4"))
-    PV_CHUNK_N = V_HEAD_DIM // PV_CHUNKS  # 128
+    PV_CHUNKS = int(os.environ.get("FLYDSL_MLA_PVC", "8"))
+    PV_CHUNK_N = V_HEAD_DIM // PV_CHUNKS  # 64 at the PVC=8 default
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def mfma_kernel(
@@ -176,12 +199,12 @@ def _build_rego(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
         fm_fast = fx.arith.FastMathFlags.fast
 
         lds = fx.SharedAllocator().allocate(SS).peek()
-        k_lds = lds.k_lds.view(fx.make_layout((BN, QK_HEAD_DIM), (K_STRIDE, 1)))
-        k_lds_1d = lds.k_lds.view(fx.make_layout(BN * K_STRIDE, 1))
+        k_lds = lds.kv_o_lds.view(fx.make_layout((BN, QK_HEAD_DIM), (K_STRIDE, 1)))
+        k_lds_1d = lds.kv_o_lds.view(fx.make_layout(BN * K_STRIDE, 1))
         # V operand for gemm2 is the first V_HEAD_DIM cols of the SAME latent held
         # in k_lds: read it as a transposed view [d, kv] (element (d,kv) at kv*576+d)
         # instead of staging a separate contiguous copy (saves V_HEAD_DIM*BN*2 B LDS).
-        vt_lds = lds.k_lds.view(fx.make_layout((V_HEAD_DIM, BN), (1, K_STRIDE)))
+        vt_lds = lds.kv_o_lds.view(fx.make_layout((V_HEAD_DIM, BN), (1, K_STRIDE)))
         s_lds = lds.s_lds.view(fx.make_layout((BM, BN), (BN, 1)))
         # gemm1's tiled C-store scatters the fragment transposed (physical
         # location holds C[n,m]); write through a column-major view so the
@@ -190,8 +213,8 @@ def _build_rego(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
         s_lds_1d = lds.s_lds.view(fx.make_layout(BM * BN, 1))
         p_lds = lds.p_lds.view(fx.make_layout((BM, BN), (BN, 1)))
         p_lds_1d = lds.p_lds.view(fx.make_layout(BM * BN, 1))
-        o_lds_2d = lds.o_lds.view(fx.make_layout((BM, V_HEAD_DIM), (V_HEAD_DIM, 1)))
-        o_lds_1d = lds.o_lds.view(fx.make_layout(O_ELEMS, 1))
+        o_lds_2d = lds.kv_o_lds.view(fx.make_layout((BM, V_HEAD_DIM), (V_HEAD_DIM, 1)))
+        o_lds_1d = lds.kv_o_lds.view(fx.make_layout(O_ELEMS, 1))
         m_lds = lds.m_lds.view(fx.make_layout(BM, 1))
         l_lds = lds.l_lds.view(fx.make_layout(BM, 1))
         corr_lds = lds.corr_lds.view(fx.make_layout(BM, 1))
