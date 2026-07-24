@@ -37,11 +37,12 @@ V_HEAD_DIM = 512
 NUM_QO_HEADS = 128
 
 # Tile config (coupled: BM x BN x gemm2-contract). Overridable via env for
-# sweeping; default 32/32 is the correctness-banked baseline.
-BLOCK_M = int(os.environ.get("FLYDSL_MLA_BM", "32"))
-# BN=32 keeps k_lds (bn*578*2 = 37 KB) + o_lds scratch small enough for occ 2
-# (LDS 74.6 KB <= 80, VGPR 244 <= 256); with the K-pad de-conflict it edges out
-# BN=96/occ1 (1.266 vs 1.293 ms) by ~2x-ing the sync-bound bucket via occupancy.
+# bounded rechecks; BM64/BN32 is the long-context winner.  The exact BM32/BN32
+# occupancy-2 kernel remains banked in mla_prefill_qtiled_mfma.py.best.
+BLOCK_M = int(os.environ.get("FLYDSL_MLA_BM", "64"))
+# BN=32 keeps the BM64 tile within the 160-KiB CU LDS limit (115,584 B) and is
+# materially faster than BN64/96.  BM64 deliberately uses occupancy 1: its
+# extra query reuse wins at S>=8192 while remaining inside the short-shape gate.
 BLOCK_N = int(os.environ.get("FLYDSL_MLA_BN", "32"))
 BLOCK_THREADS = 256
 LOG2E = 1.4426950408889634
