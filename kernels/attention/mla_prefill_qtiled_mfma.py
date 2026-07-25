@@ -703,6 +703,12 @@ def _build_olds(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
 def build_mla_prefill_mfma_module(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
     """Dispatch to the register-resident O path (FLYDSL_MLA_REGO=1, default) or the
     o_lds round-trip fallback (FLYDSL_MLA_REGO=0)."""
+    if os.environ.get("FLYDSL_MLA_WHOLEHEAD", "1") not in ("0", "false", "False"):
+        from kernels.attention.mla_prefill_qtiled_mfma_wholehead import (
+            build_mla_prefill_mfma_wholehead_module,
+        )
+
+        return build_mla_prefill_mfma_wholehead_module(is_causal)
     if _REGO:
         return _build_rego(is_causal, bm, bn)
     return _build_olds(is_causal, bm, bn)
