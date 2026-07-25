@@ -384,6 +384,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     c_zero_v4f32 = Vec.filled(4, 0.0, fx.Float32)
     c_log2e = fx.Float32(LOG2E)
     c_inv_log2e = fx.Float32(1.0 / LOG2E)
+    # Pre-fold log2e into the softmax scale so the exp2 path drops a per-element
+    # multiply: scaled2 = p * (softmax_scale * log2e); exp_arg = scaled2 - max2.
+    softmax_scale_l2e = softmax_scale * c_log2e
 
     # ---- Buffer resources ----
     query_rsrc = buffer_ops.create_buffer_resource(query)
@@ -880,7 +883,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         """
         result = [None] * P_VALS_PER_THR
         for i in range_constexpr(P_VALS_PER_THR):
-            result[i] = _f32(p_vals[i]) * softmax_scale
+            result[i] = _f32(p_vals[i]) * softmax_scale_l2e
 
         if const_expr(check_boundary is not False):
             kv_end = _idx(kv_end_i32)
@@ -928,15 +931,15 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             rescale = c_one_f32
         else:
             new_row_max = _fmax(local_max, row_max_old, fm_no_inf)
-            # rescale = exp2((old_max - new_max) * log2e)
+            # rescale = exp2(old_max2 - new_max2); log2e already folded into scale.
             diff = _fsub(row_max_old, new_row_max, fm_no_inf)
-            rescale = _fast_exp2(_fmul(diff, c_log2e, fm_no_inf))
+            rescale = _fast_exp2(diff)
 
         # exp(p - max) for each value, and sum
         p_exp_vals = [None] * P_VALS_PER_THR
         local_sum = c_zero_f32
         for i in range_constexpr(P_VALS_PER_THR):
-            exp_arg = _fmul(_fsub(scaled[i], new_row_max, fm_no_inf), c_log2e, fm_no_inf)
+            exp_arg = _fsub(scaled[i], new_row_max, fm_no_inf)
             p_exp_vals[i] = _fast_exp2(exp_arg)
             local_sum = _fadd(local_sum, p_exp_vals[i], fm_no_inf)
 
@@ -1052,9 +1055,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             k0 = [_load_k_from_lds(k_base_i32, 16 * h, tile_0 * BLOCK_K) for h in range_constexpr(P_COMP_SUBS)]
             k1 = [_load_k_from_lds(k_base_i32, 16 * h, tile_1 * BLOCK_K) for h in range_constexpr(P_COMP_SUBS)]
 
-            # Prefetch block nope_pair+1 of next tile (inline asm)
-            _maybe_prefetch(nope_pair + 1)
-
             rocdl.sched_barrier(0)
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=P_COMP_SUBS))
 
@@ -1068,6 +1068,10 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             else:
                 for h in range_constexpr(P_COMP_SUBS):
                     p_comp[h] = _mfma_fp8(T.f32x4, [k0[h], q_0, p_comp[h], 0, 0, 0])
+
+            # Prefetch block nope_pair+1 of next tile (inline asm),
+            # issued between the two MFMA groups to overlap buffer_load latency.
+            _maybe_prefetch(nope_pair + 1)
 
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
@@ -1173,8 +1177,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             fx.Int32(-1),
         )
 
-    def _gemm2_core(p_pack, oaccu, vt_base_i32):
-        """GEMM2 PV accumulation loop (shared by first-iter and rescale paths)."""
+    def _gemm2_core(p_pack, oaccu, vt_base_i32, pre_pair0=None):
+        """GEMM2 PV accumulation loop (shared by first-iter and rescale paths).
+
+        pre_pair0: gfx950-only. When provided, PV pair 0's V strips were already
+        issued by the caller (to overlap their ds_read latency with the preceding
+        rescale VALU window); reuse them instead of re-issuing.
+        """
         K_HALVES = BLOCK_N // 32
         rocdl.s_setprio(15)
         for pv_pair in range_constexpr(NUM_PV_ITERS // 2):
@@ -1186,14 +1195,17 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             if const_expr(K_HALVES == 2):
                 p_lo, p_hi = p_pack
 
-                # Issue all V reads first, then drain in MFMA-consumption order.
-                a_h0_top, a_h0_bot = _issue_v_strip(vt_base_i32, 0, col_a_strip)
-                a_h1_top, a_h1_bot = _issue_v_strip(vt_base_i32, 32, col_a_strip)
-                b_h0_top, b_h0_bot = _issue_v_strip(vt_base_i32, 0, col_b_strip)
-                b_h1_top, b_h1_bot = _issue_v_strip(vt_base_i32, 32, col_b_strip)
+                if const_expr(pv_pair == 0 and pre_pair0 is not None):
+                    read_top, read_bot = pre_pair0
+                else:
+                    # Issue all V reads first, then drain in MFMA-consumption order.
+                    a_h0_top, a_h0_bot = _issue_v_strip(vt_base_i32, 0, col_a_strip)
+                    a_h1_top, a_h1_bot = _issue_v_strip(vt_base_i32, 32, col_a_strip)
+                    b_h0_top, b_h0_bot = _issue_v_strip(vt_base_i32, 0, col_b_strip)
+                    b_h1_top, b_h1_bot = _issue_v_strip(vt_base_i32, 32, col_b_strip)
 
-                read_top = [a_h0_top, a_h1_top, b_h0_top, b_h1_top]
-                read_bot = [a_h0_bot, a_h1_bot, b_h0_bot, b_h1_bot]
+                    read_top = [a_h0_top, a_h1_top, b_h0_top, b_h1_top]
+                    read_bot = [a_h0_bot, a_h1_bot, b_h0_bot, b_h1_bot]
                 p_args = [p_lo, p_hi, p_lo, p_hi]
                 iter_idxs = [iter_a, iter_a, iter_b, iter_b]
                 wait_lgkm = [6, 4, 2, 0]
@@ -1257,10 +1269,17 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         This runs after the branch merge so oaccu never enters phi nodes.
         """
+        # gfx950: pre-issue PV pair 0's V reads so their ds_read latency overlaps
+        # the rescale VALU window (MFMA/LDS pipes would otherwise be idle here).
+        # The existing _barrier(lgkmcnt=0) below drains them before the swap+MFMA.
+        if const_expr(BLOCK_N // 32 == 2):
+            pre0 = _issue_pv_strips(vt_base_i32, 0)
+        else:
+            pre0 = None
         oaccu = _rescale_oaccu(oaccu_in, rescale)
         _barrier(lgkmcnt=0)
         rocdl.sched_barrier(0)
-        return _gemm2_core(p_pack, oaccu, vt_base_i32)
+        return _gemm2_core(p_pack, oaccu, vt_base_i32, pre_pair0=pre0)
 
     def _pack_f32x4_to_bf16_2dw(acc_val):
         """Convert f32x4 accumulator to 2 packed bf16 dwords."""
@@ -1595,6 +1614,24 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             pair_bot = _load_v_tr_from_lds(v_base_i32, k_half_row_base + 16, col_strip)
             return pair_top, pair_bot
 
+        def _issue_pv_strips(v_base_i32, pv_pair):
+            """Issue the 4 V strips (8 ds_read_tr8_b64) for one PV pair, returning
+            (read_top, read_bot) lists of 4 raw v2i32 loads in MFMA-consumption
+            order. Used to pre-issue PV pair 0 so its ds_read latency overlaps the
+            preceding rescale VALU window."""
+            iter_a = pv_pair * 2
+            iter_b = pv_pair * 2 + 1
+            col_a_strip = iter_a * MFMA_N * 2
+            col_b_strip = iter_b * MFMA_N * 2
+            a_h0_top, a_h0_bot = _issue_v_strip(v_base_i32, 0, col_a_strip)
+            a_h1_top, a_h1_bot = _issue_v_strip(v_base_i32, 32, col_a_strip)
+            b_h0_top, b_h0_bot = _issue_v_strip(v_base_i32, 0, col_b_strip)
+            b_h1_top, b_h1_bot = _issue_v_strip(v_base_i32, 32, col_b_strip)
+            return (
+                [a_h0_top, a_h1_top, b_h0_top, b_h1_top],
+                [a_h0_bot, a_h1_bot, b_h0_bot, b_h1_bot],
+            )
+
         # ==================================================================
         def _v_base_i32(p_lds_kv_base):
             """V3: V is read transposed-during-load directly from the KV LDS region
@@ -1825,7 +1862,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             """Write LSE for split output (first 16 lanes per warp)."""
             if ArithValue(lane_idx) < 16:
                 log2_sum = fmath.log2(rse, fastmath=fm_fast)
-                lse = fmath.fma(log2_sum, c_inv_log2e, rm, fastmath=fm_fast)
+                # rm is now in log2 units (scale pre-folded with log2e), so
+                # lse = log2_sum/log2e + rm/log2e = (log2_sum + rm) * (1/log2e).
+                lse = _fmul(_fadd(log2_sum, rm, fm_no_inf), c_inv_log2e, fm_no_inf)
                 row_idx = _raw(ArithValue(lane_idx) + warp_idx * 16 + _idx(pqo_loc_i32) * NUM_QO_HEADS)
                 buffer_ops.buffer_store(lse, split_lse_rsrc, row_idx)
 
