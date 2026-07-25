@@ -1,0 +1,37 @@
+{
+ "schema": 1,
+ "updated": "2026-07-25T00:52:44Z",
+ "repo": "JohnQinAMD/FlyDSL-amd",
+ "runs": [
+  {
+   "run_id": 30137290875,
+   "pr": null,
+   "commit": "41362d6f6acaf7f751a28bbd2aa63441da4ad86a",
+   "branch": "main",
+   "event": "push",
+   "title": "test(mla): harden attention validation harnesses",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30137290875",
+   "created_at": "2026-07-25T00:52:32Z",
+   "updated_at": "2026-07-25T00:52:41Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 30136202193,
+   "pr": null,
+   "commit": "ddaa507f56aa3fe9c08ebe6161a717b755540248",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Make MLIR cache fallback reliable (#897)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30136202193",
+   "created_at": "2026-07-25T00:24:22Z",
+   "updated_at": "2026-07-25T00:52:34Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  }
+ ]
+}
