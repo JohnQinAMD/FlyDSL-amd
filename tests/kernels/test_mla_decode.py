@@ -36,14 +36,13 @@ try:
     from aiter.ops.attention import (  # noqa: E402  # pyright: ignore[reportMissingImports]
         get_mla_metadata_info_v1,
         get_mla_metadata_v1,
-        hk_mla_decode_fwd,
         mla_decode_stage1_asm_fwd,
         mla_reduce_v1,
     )
 except ImportError as _e:
-    # aiter is installed but its attention API drifted (e.g. hk_mla_decode_fwd
-    # was renamed). Skip this module cleanly instead of aborting collection for
-    # the whole suite.
+    # Skip only when the same-format metadata/stage-1/reduce API is unavailable.
+    # The HK v32/v40 entry points use different layouts and are not references
+    # for this plain-e4m3fn kernel.
     pytest.skip(f"aiter.ops.attention API mismatch ({_e})", allow_module_level=True)
 
 from kernels.attention.mla_fwd_decode import flydsl_mla_fwd_decode  # noqa: E402
@@ -414,29 +413,6 @@ def run_single(
     assert cos_diff < 3e-2, f"cos_diff={cos_diff} exceeds threshold"
 
     if bench_aiter:
-        aiter_hk_out = torch.empty_like(out_asm).fill_(-1)
-        aiter_hk_logits = torch.empty_like(logits)
-        aiter_hk_lse = torch.empty_like(attn_lse)
-
-        def launch_aiter_hk():
-            hk_mla_decode_fwd(
-                q_fp8,
-                kv_buffer_fp8.view(num_page, page_size, nhead_kv, QK_HEAD_DIM),
-                qo_indptr,
-                kv_indptr,
-                kv_indices,
-                kv_last_page_lens,
-                work_indptr,
-                work_info_set,
-                max_seqlen_qo,
-                sm_scale,
-                aiter_hk_logits,
-                aiter_hk_lse,
-                aiter_hk_out,
-            )
-
-        _bench_decode_stage1("aiter.hk_mla_decode_fwd", launch_aiter_hk, aiter_hk_out, aiter_hk_logits, aiter_hk_lse)
-
         aiter_asm_out = torch.empty_like(out_asm).fill_(-1)
         aiter_asm_logits = torch.empty_like(logits)
         aiter_asm_lse = torch.empty_like(attn_lse)
@@ -500,7 +476,7 @@ def main():
     parser.add_argument(
         "--bench_aiter",
         action="store_true",
-        help="Also benchmark aiter.hk_mla_decode_fwd and aiter.mla_decode_stage1_asm_fwd.",
+        help="Also benchmark the same-format aiter.mla_decode_stage1_asm_fwd.",
     )
     args = parser.parse_args()
 

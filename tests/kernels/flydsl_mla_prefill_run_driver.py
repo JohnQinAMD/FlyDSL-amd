@@ -18,6 +18,7 @@ kernels/attention/mla_prefill_qtiled*.py; it starts as a stub (raises) so correc
 the fellow lands a real kernel.
 """
 from __future__ import annotations
+
 import argparse
 import math
 import os
@@ -88,14 +89,29 @@ def _build(S):
     return q, kv, kv_indices, qo_indptr, kv_indptr, out, sm_scale, num_page
 
 
-def _oracle(q, kv, kv_indices, num_page, sm_scale, S, causal):
-    qf = q.to(torch.float32).transpose(0, 1).unsqueeze(0)                    # [1,NH,S,576]
-    kv_g = kv.to(torch.float32).view(num_page, QK)[kv_indices][:S]           # logical order
-    kf = kv_g.unsqueeze(0).unsqueeze(0).expand(1, NH, S, QK)
-    vf = kf[..., :VD]
-    ref = torch.nn.functional.scaled_dot_product_attention(
-        qf, kf, vf, is_causal=causal, scale=sm_scale)
-    return ref.squeeze(0).transpose(0, 1)                                    # [S,NH,512]
+def _oracle(q, kv, kv_indices, num_page, sm_scale, S, causal, head_chunk=0):
+    """Compute the fp32 SDPA reference without materializing all heads at long S."""
+    kv_g = kv.to(torch.float32).view(num_page, QK)[kv_indices][:S]
+    k1 = kv_g.unsqueeze(0).unsqueeze(0)
+    v1 = k1[..., :VD]
+    chunk = head_chunk or (4 if S >= 8192 else NH)
+    ref = torch.empty((S, NH, VD), dtype=torch.float32)
+    for hs in range(0, NH, chunk):
+        he = min(hs + chunk, NH)
+        hc = he - hs
+        qf = q[:, hs:he, :].to(torch.float32).permute(1, 0, 2).unsqueeze(0)
+        ref[:, hs:he, :] = (
+            torch.nn.functional.scaled_dot_product_attention(
+                qf,
+                k1.expand(1, hc, S, QK),
+                v1.expand(1, hc, S, VD),
+                is_causal=causal,
+                scale=sm_scale,
+            )
+            .squeeze(0)
+            .permute(1, 0, 2)
+        )
+    return ref
 
 
 def main():
@@ -107,6 +123,12 @@ def main():
     ap.add_argument("--bench-mode", dest="bench_mode", action="store_true")
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument(
+        "--head-chunk",
+        type=int,
+        default=0,
+        help="SDPA oracle heads per chunk (0 selects 4 for S>=8192, else all)",
+    )
     args = ap.parse_args()
     action = args.action or ("performance" if args.bench_mode else "correctness")
     S = _parse_shape(args.shape)
@@ -134,7 +156,9 @@ def main():
         st = [torch.cuda.Event(enable_timing=True) for _ in range(N)]
         en = [torch.cuda.Event(enable_timing=True) for _ in range(N)]
         for i in range(N):
-            st[i].record(); launch(); en[i].record()
+            st[i].record()
+            launch()
+            en[i].record()
         torch.cuda.synchronize()
         us = sorted(a.elapsed_time(b) * 1000 for a, b in zip(st, en))[N // 2]
         print(f"median_ms: {us / 1000.0:.6f}")
@@ -146,9 +170,9 @@ def main():
         hbm_bytes = (S * NH * QK + S * QK + S * NH * VD) * 2
         print(f"flops: {flops:.6e}")
         print(f"hbm_bytes: {hbm_bytes:.6e}")
-        print(f"dtype: bf16")
+        print("dtype: bf16")
 
-    ref = _oracle(q, kv, kvi, npg, sm, S, causal)
+    ref = _oracle(q, kv, kvi, npg, sm, S, causal, head_chunk=args.head_chunk)
     x, y = ref.double(), out.double()
     cos = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
     noise = (x - y).norm().item()
