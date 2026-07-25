@@ -6,10 +6,10 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import buffer_ops, gpu
 from kernels.attention.mla_prefill_qtiled_mfma_intrinsics import (
     whole_loop_fixed_clobber,
 )
+from kernels.common import buffer_ops
 
 BLOCK_THREADS = 256
 SHORT_PERSISTENT_GRID = 256

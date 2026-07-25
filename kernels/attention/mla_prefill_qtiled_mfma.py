@@ -29,8 +29,9 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
+from kernels.common import buffer_ops
 
 QK_HEAD_DIM = 576
 V_HEAD_DIM = 512
@@ -168,7 +169,7 @@ def _build_rego(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
     BN = int(bn)
     HG = NUM_QO_HEADS // BM
     SS = _make_shared_rego_overlay(BM, BN)
-    GATHER_PER_THR = (BN * QK_HEAD_DIM + BLOCK_THREADS - 1) // BLOCK_THREADS
+    GATHER_PER_THR = (BN * QK_HEAD_DIM + BLOCK_THREADS - 1) // BLOCK_THREADS  # noqa: F841
     GATHER_VEC = 8
     assert QK_HEAD_DIM % GATHER_VEC == 0 and V_HEAD_DIM % GATHER_VEC == 0
     QK_VEC_PER_ROW = QK_HEAD_DIM // GATHER_VEC
@@ -209,7 +210,7 @@ def _build_rego(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
         # gemm1's tiled C-store scatters the fragment transposed (physical
         # location holds C[n,m]); write through a column-major view so the
         # row-major read view above then yields the correct C[m,n].
-        s_lds_wr = lds.s_lds.view(fx.make_layout((BM, BN), (1, BM)))
+        s_lds_wr = lds.s_lds.view(fx.make_layout((BM, BN), (1, BM)))  # noqa: F841
         s_lds_1d = lds.s_lds.view(fx.make_layout(BM * BN, 1))
         p_lds = lds.p_lds.view(fx.make_layout((BM, BN), (BN, 1)))
         p_lds_1d = lds.p_lds.view(fx.make_layout(BM * BN, 1))
@@ -217,7 +218,7 @@ def _build_rego(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
         o_lds_1d = lds.kv_o_lds.view(fx.make_layout(O_ELEMS, 1))
         m_lds = lds.m_lds.view(fx.make_layout(BM, 1))
         l_lds = lds.l_lds.view(fx.make_layout(BM, 1))
-        corr_lds = lds.corr_lds.view(fx.make_layout(BM, 1))
+        corr_lds = lds.corr_lds.view(fx.make_layout(BM, 1))  # noqa: F841
         corr_bf_lds = lds.corr_bf_lds.view(fx.make_layout(BM, 1))
         # broadcast (v-dim stride 0) view of the bf16 per-head corr, shaped like an O
         # PV-chunk tile so the gemm2 C-copy reads corr[q-row] into the O-fragment layout.
@@ -454,7 +455,7 @@ def _build_olds(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
     BN = int(bn)
     HG = NUM_QO_HEADS // BM
     SS = _make_shared(BM, BN)
-    GATHER_PER_THR = (BN * QK_HEAD_DIM + BLOCK_THREADS - 1) // BLOCK_THREADS
+    GATHER_PER_THR = (BN * QK_HEAD_DIM + BLOCK_THREADS - 1) // BLOCK_THREADS  # noqa: F841
     GATHER_VEC = 8
     assert QK_HEAD_DIM % GATHER_VEC == 0 and V_HEAD_DIM % GATHER_VEC == 0
     QK_VEC_PER_ROW = QK_HEAD_DIM // GATHER_VEC
@@ -495,7 +496,7 @@ def _build_olds(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
         # gemm1's tiled C-store scatters the fragment transposed (physical
         # location holds C[n,m]); write through a column-major view so the
         # row-major read view above then yields the correct C[m,n].
-        s_lds_wr = lds.s_lds.view(fx.make_layout((BM, BN), (1, BM)))
+        s_lds_wr = lds.s_lds.view(fx.make_layout((BM, BN), (1, BM)))  # noqa: F841
         s_lds_1d = lds.s_lds.view(fx.make_layout(BM * BN, 1))
         p_lds = lds.p_lds.view(fx.make_layout((BM, BN), (BN, 1)))
         p_lds_1d = lds.p_lds.view(fx.make_layout(BM * BN, 1))
@@ -504,10 +505,12 @@ def _build_olds(is_causal: bool = True, bm: int = BLOCK_M, bn: int = BLOCK_N):
         m_lds = lds.m_lds.view(fx.make_layout(BM, 1))
         l_lds = lds.l_lds.view(fx.make_layout(BM, 1))
         corr_lds = lds.corr_lds.view(fx.make_layout(BM, 1))
-        corr_bf_lds = lds.corr_bf_lds.view(fx.make_layout(BM, 1))
+        corr_bf_lds = lds.corr_bf_lds.view(fx.make_layout(BM, 1))  # noqa: F841
         # broadcast (v-dim stride 0) view of the bf16 per-head corr, shaped like an O
         # PV-chunk tile so the gemm2 C-copy reads corr[q-row] into the O-fragment layout.
-        corr_bcast = lds.corr_bf_lds.view(fx.make_layout((BM, PV_CHUNK_N), (1, 0)))
+        corr_bcast = lds.corr_bf_lds.view(  # noqa: F841
+            fx.make_layout((BM, PV_CHUNK_N), (1, 0))
+        )
         phys_lds = lds.phys_lds.view(fx.make_layout(BN, 1))
 
         kvidx_rsrc = buffer_ops.create_buffer_resource(kv_page_indices)

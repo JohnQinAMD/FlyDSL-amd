@@ -24,11 +24,10 @@ REFERENCES for the implementation (Read these):
 """
 from __future__ import annotations
 
+import functools
 import os
 
 import torch
-
-import functools
 
 QK_HEAD_DIM = 576
 V_HEAD_DIM = 512
@@ -69,11 +68,10 @@ def flydsl_mla_prefill(
 ) -> None:
     """Query-tiled absorbed-MLA prefill. Writes attention output into ``out``.
 
-    For full prefill (one sequence, kv_len == q_len == S): query token j attends
-    KV logical positions 0..j (causal). Multi-sequence via the CSR indptrs.
-
-    Batch=1 full prefill: token j attends KV logical 0..j (causal). Logical KV
-    position i lives in physical page kv_page_indices[kv_indptr[b] + i].
+    This implementation currently supports one full-prefill sequence with
+    ``kv_len == q_len == S``. Query token ``j`` attends KV positions ``0..j``
+    when causal. Logical KV position ``i`` lives in physical page
+    ``kv_page_indices[kv_indptr[0] + i]``.
     """
     assert query.ndim == 3 and query.size(1) == NUM_QO_HEADS and query.size(2) == QK_HEAD_DIM, (
         f"query: expected [total_q, {NUM_QO_HEADS}, {QK_HEAD_DIM}], got {list(query.shape)}"
@@ -85,6 +83,10 @@ def flydsl_mla_prefill(
 
     total_q = query.size(0)
     num_page = kv_buffer.size(0)
+    assert qo_indptr.numel() == 2 and kv_indptr.numel() == 2, (
+        "FlyDSL MLA prefill currently supports exactly one sequence"
+    )
+    assert kv_page_indices.numel() == total_q, "full prefill requires kv_len == q_len"
 
     # batch=1 CSR: kv logical positions live at kv_page_indices[kv_indptr[0] + i]
     kv_base = int(kv_indptr[0].item())
@@ -120,6 +122,15 @@ def flydsl_mla_prefill(
 
                 print("[mla_prefill] MFMA path failed, falling back to scalar:", exc)
                 traceback.print_exc()
+            # The scalar kernel allocates a fixed MAX_KV score buffer in LDS.
+            # Never silently route a longer sequence into an out-of-bounds path.
+            from kernels.attention.mla_prefill_qtiled_kernel import MAX_KV
+
+            if total_q > MAX_KV:
+                raise RuntimeError(
+                    f"MFMA MLA prefill failed at S={total_q}; "
+                    f"the scalar fallback supports at most S={MAX_KV}"
+                ) from exc
 
     launcher = _get_launcher(bool(causal))
     launcher(

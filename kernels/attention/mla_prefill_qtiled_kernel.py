@@ -20,8 +20,9 @@ kv_page_indices[kv_indptr[b] + i] (page size 1).
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
+from kernels.common import buffer_ops
 
 QK_HEAD_DIM = 576
 V_HEAD_DIM = 512
@@ -195,8 +196,8 @@ def build_mla_prefill_qtiled_module(is_causal: bool = True, block_h: int = BLOCK
         thread_sum = list(ssum_res)[:H]
         gpu.barrier()
 
-        l = [block_reduce(thread_sum[h], "sum") for h in range_constexpr(H)]
-        inv_l = [fx.Float32(1.0) / l[h] for h in range_constexpr(H)]
+        row_sum = [block_reduce(thread_sum[h], "sum") for h in range_constexpr(H)]
+        inv_l = [fx.Float32(1.0) / row_sum[h] for h in range_constexpr(H)]
 
         # ---- output: O[h][d] = sum_k p[h][k]*v[k][d] ; d = tid, tid+256 ----
         d0 = tid
