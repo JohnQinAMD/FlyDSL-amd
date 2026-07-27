@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-07-27T19:53:47Z",
+ "updated": "2026-07-27T21:03:00Z",
  "repo": "JohnQinAMD/FlyDSL-amd",
  "runs": [
+  {
+   "run_id": 30305172521,
+   "pr": null,
+   "commit": "6c8330ce29c0830952dc6faa76e840dbf461b457",
+   "branch": "main",
+   "event": "push",
+   "title": "Merge pull request #2 from JohnQinAMD/codex/dsv4-training-sparse-mla",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30305172521",
+   "created_at": "2026-07-27T21:02:41Z",
+   "updated_at": "2026-07-27T21:02:43Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 30304388844,
+   "pr": 2,
+   "commit": "efc7606ec5e7b7dea924b8cb481f29584a8f1c1c",
+   "branch": "codex/dsv4-training-sparse-mla",
+   "event": "pull_request",
+   "title": "[Attention] Add gfx950 DSV4 sparse MLA training forward and backward",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30304388844",
+   "created_at": "2026-07-27T20:51:47Z",
+   "updated_at": "2026-07-27T20:52:36Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 30300358991,
+   "pr": null,
+   "commit": "323ff287c81c20d3ab20a02bfd3c042d6a590574",
+   "branch": "main",
+   "event": "push",
+   "title": "Merge gfx950 DeepSeek-V4 sparse decode and AITER ASM benchmark",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30300358991",
+   "created_at": "2026-07-27T19:55:18Z",
+   "updated_at": "2026-07-27T21:02:43Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 30299872439,
    "pr": 1,
@@ -20,7 +65,7 @@
   },
   {
    "run_id": 30295578419,
-   "pr": 1,
+   "pr": null,
    "commit": "3196822c8caf351c6a50264cf251993f366bea3b",
    "branch": "codex/v4-sparse-decode-m16",
    "event": "pull_request",
@@ -35,7 +80,7 @@
   },
   {
    "run_id": 30295536185,
-   "pr": 1,
+   "pr": null,
    "commit": "d253f74325e97c75d0598977c6393c6a4e1e16d3",
    "branch": "codex/v4-sparse-decode-m16",
    "event": "pull_request",
