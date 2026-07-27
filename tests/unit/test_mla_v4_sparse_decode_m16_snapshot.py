@@ -33,7 +33,7 @@ def test_m16_source_matches_the_authenticated_candidate_snapshot():
     assert hashlib.sha256(KERNEL.read_bytes()).hexdigest() == MEASURED_M16_SOURCE_SHA256
 
 
-def test_m16_s536_registration_contract_is_selected():
+def test_m16_s536_registration_contract_is_present_in_snapshot():
     tree = _tree()
     assert _literal_assignment(tree, "FORGE_VARIANT") == "m16s536"
     assert _literal_assignment(tree, "M16S536_KV_LDS_STRIDE") == 536
