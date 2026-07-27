@@ -235,8 +235,14 @@ def _build_inputs(runtime: Runtime, shape: Shape, seed: int) -> Inputs:
     )
 
 
-def _torch_reference(runtime: Runtime, inputs: Inputs) -> tuple[Any, ...]:
-    """Explicit sparse-softmax forward/backward, chunked over query tokens."""
+def _torch_reference(
+    runtime: Runtime,
+    inputs: Inputs,
+    *,
+    saved_output: Any | None = None,
+    saved_lse: Any | None = None,
+) -> tuple[Any, ...]:
+    """Explicit sparse-softmax reference, optionally using the saved bwd inputs."""
     torch = runtime.torch
     chunk_size = int(os.environ.get("FLYDSL_V4_TRAIN_REFERENCE_CHUNK", "16"))
     if chunk_size <= 0:
@@ -264,18 +270,25 @@ def _torch_reference(runtime: Runtime, inputs: Inputs) -> tuple[Any, ...]:
             torch.logsumexp(scores, dim=-1),
             inputs.sink.view(1, heads),
         )
-        probabilities = torch.exp(scores - local_lse.unsqueeze(-1))
-        probabilities = torch.where(valid[:, None, :], probabilities, 0.0)
-        local_out = torch.einsum("chr,crd->chd", probabilities, keys)
-        delta = (local_out * grad_output[start:end]).sum(dim=-1)
-        dscores = probabilities * (torch.einsum("chd,crd->chr", grad_output[start:end], keys) - delta.unsqueeze(-1))
+        forward_probabilities = torch.exp(scores - local_lse.unsqueeze(-1))
+        forward_probabilities = torch.where(valid[:, None, :], forward_probabilities, 0.0)
+        local_out = torch.einsum("chr,crd->chd", forward_probabilities, keys)
+
+        backward_lse = local_lse if saved_lse is None else saved_lse[start:end].float()
+        backward_probabilities = torch.exp(scores - backward_lse.unsqueeze(-1))
+        backward_probabilities = torch.where(valid[:, None, :], backward_probabilities, 0.0)
+        backward_out = local_out if saved_output is None else saved_output[start:end].float()
+        delta = (backward_out * grad_output[start:end]).sum(dim=-1)
+        dscores = backward_probabilities * (
+            torch.einsum("chd,crd->chr", grad_output[start:end], keys) - delta.unsqueeze(-1)
+        )
 
         out[start:end] = local_out
         lse[start:end] = local_lse
         dq[start:end, :, :DIM] = torch.einsum("chr,crd->chd", dscores, keys) * SCALE
         contributions = torch.einsum(
             "chr,chd->crd",
-            probabilities,
+            backward_probabilities,
             grad_output[start:end],
         )
         contributions += torch.einsum("chr,chd->crd", dscores, q[start:end]) * SCALE
@@ -285,7 +298,7 @@ def _torch_reference(runtime: Runtime, inputs: Inputs) -> tuple[Any, ...]:
             safe.reshape(-1)[flat_valid],
             contributions.reshape(-1, DIM)[flat_valid],
         )
-        sink_probability = torch.exp(inputs.sink.view(1, heads) - local_lse)
+        sink_probability = torch.exp(inputs.sink.view(1, heads) - backward_lse)
         dsink -= (sink_probability * delta).sum(dim=0)
 
     return out, lse, dq, dkv, dsink
@@ -317,6 +330,7 @@ def _validate_case(
         attn_sink=inputs.sink,
         scale=SCALE,
         canonical_topk=canonical_topk,
+        assume_bounded_scores=canonical_topk,
     )
     gradients = runtime.bwd(
         inputs.q,
@@ -330,7 +344,12 @@ def _validate_case(
         canonical_topk=canonical_topk,
     )
     torch.cuda.synchronize()
-    ref_output, ref_lse, ref_dq, ref_dkv, ref_dsink = _torch_reference(runtime, inputs)
+    ref_output, ref_lse, ref_dq, ref_dkv, ref_dsink = _torch_reference(
+        runtime,
+        inputs,
+        saved_output=output,
+        saved_lse=lse,
+    )
     forward_snr = _snr_db(torch, ref_output, output)
     lse_snr = _snr_db(torch, ref_lse, lse)
     backward_snr = {
@@ -351,6 +370,7 @@ def _validate_case(
         attn_sink=inputs.sink,
         scale=SCALE,
         canonical_topk=canonical_topk,
+        assume_bounded_scores=canonical_topk,
     )
     gradients2 = runtime.bwd(
         inputs.q,
@@ -444,6 +464,7 @@ def _run_shape(runtime: Runtime, shape: Shape, *, benchmark: bool, case_index: i
             attn_sink=inputs.sink,
             scale=SCALE,
             canonical_topk=True,
+            assume_bounded_scores=True,
         )
 
     def run_bwd() -> Any:
@@ -497,17 +518,87 @@ def _run_generic_topk_guard(runtime: Runtime) -> dict[str, Any]:
     valid = inputs.topk >= 0
     shifted = (inputs.topk + 1) % shape.sequence
     inputs.topk = runtime.torch.where(valid, shifted, inputs.topk).contiguous()
-    _, _, correctness = _validate_case(
+    (output, lse), gradients, correctness = _validate_case(
         runtime,
         inputs,
         canonical_topk=False,
     )
+    kv_2d = inputs.kv[:, 0].contiguous()
+    output_2d, lse_2d = runtime.fwd(
+        inputs.q,
+        kv_2d,
+        inputs.topk,
+        attn_sink=inputs.sink,
+        scale=SCALE,
+        canonical_topk=False,
+        assume_bounded_scores=False,
+    )
+    gradients_2d = runtime.bwd(
+        inputs.q,
+        kv_2d,
+        output_2d,
+        inputs.grad_output,
+        inputs.topk,
+        lse_2d,
+        attn_sink=inputs.sink,
+        scale=SCALE,
+        canonical_topk=False,
+    )
+    assert runtime.torch.equal(output, output_2d)
+    assert runtime.torch.equal(lse, lse_2d)
+    assert runtime.torch.equal(gradients[0], gradients_2d[0])
+    assert gradients_2d[1].shape == kv_2d.shape
+    assert runtime.torch.equal(gradients[1][:, 0], gradients_2d[1])
+    assert runtime.torch.equal(gradients[2], gradients_2d[2])
     result = {
         "shape": "flash_custom_r128_s512",
         "canonical_topk": False,
+        "kv_2d_rank_preserved": True,
         "correctness": correctness,
     }
     print("V4_TRAIN_GENERIC_TOPK " + json.dumps(result, sort_keys=True), flush=True)
+    return result
+
+
+def _run_generic_high_dynamic_range_guard(runtime: Runtime) -> dict[str, Any]:
+    """Keep generic softmax stable when its maximum follows an empty first pair."""
+    torch = runtime.torch
+    shape = Shape("flash", 0, 512)
+    inputs = _build_inputs(runtime, shape, seed=20262728)
+    inputs.q.zero_()
+    inputs.q[..., :DIM].fill_(10.0)
+    inputs.kv.zero_()
+    inputs.kv[32:128, 0, :DIM].fill_(10.0)
+    inputs.topk.fill_(-1)
+    later_rows = torch.arange(32, 128, dtype=torch.int32, device=inputs.topk.device)
+    inputs.topk[:, 32:] = later_rows
+    inputs.sink.zero_()
+
+    output, lse = runtime.fwd(
+        inputs.q,
+        inputs.kv,
+        inputs.topk,
+        attn_sink=inputs.sink,
+        scale=SCALE,
+        canonical_topk=False,
+        assume_bounded_scores=False,
+    )
+    torch.cuda.synchronize()
+    ref_output, ref_lse, *_ = _torch_reference(runtime, inputs)
+    forward_snr = _snr_db(torch, ref_output, output)
+    lse_snr = _snr_db(torch, ref_lse, lse)
+    assert bool(torch.isfinite(output).all().item())
+    assert bool(torch.isfinite(lse).all().item())
+    assert forward_snr >= 40.0, forward_snr
+    assert lse_snr >= 40.0, lse_snr
+    result = {
+        "shape": "flash_custom_r128_s512_high_dynamic_range",
+        "canonical_topk": False,
+        "forward_snr_db": forward_snr,
+        "lse_snr_db": lse_snr,
+        "finite": True,
+    }
+    print("V4_TRAIN_GENERIC_STABILITY " + json.dumps(result, sort_keys=True), flush=True)
     return result
 
 
@@ -520,6 +611,7 @@ def _driver(mode: str) -> None:
     ]
     if mode == "correctness":
         results.append(_run_generic_topk_guard(runtime))
+        results.append(_run_generic_high_dynamic_range_guard(runtime))
     summary: dict[str, Any] = {
         "mode": mode,
         "cases": len(results),

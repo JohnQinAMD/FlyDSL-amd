@@ -4701,6 +4701,8 @@ def sparse_mla_bwd_flydsl(
     arch = torch.cuda.get_device_properties(q.device).gcnArchName.split(":", 1)[0]
     if arch != "gfx950":
         raise RuntimeError(f"DSV4 sparse-MLA training requires gfx950, got {arch}")
+    if q.device.index != torch.cuda.current_device():
+        raise ValueError("q must be on the current CUDA device; set the process device before calling")
     if q.dtype != torch.bfloat16 or kv.dtype != torch.bfloat16:
         raise TypeError("q and kv must use torch.bfloat16")
     if o.dtype != torch.bfloat16 or do.dtype != torch.bfloat16:
@@ -4719,7 +4721,8 @@ def sparse_mla_bwd_flydsl(
     topk = topk_indices.shape[1]
     if scale is None:
         scale = 1.0 / (kv_lora_rank**0.5)
-    if kv.dim() == 2:
+    kv_was_2d = kv.dim() == 2
+    if kv_was_2d:
         kv = kv.unsqueeze(1)
     num_kv = kv.shape[0]
     if D != 512 or d_qk != 576 or kv.shape[1:] != (1, 576):
@@ -4961,7 +4964,7 @@ def sparse_mla_bwd_flydsl(
     # zero the 64 rope cols (512..575) in-kernel (matches triton's zeroed rope),
     # folding away the strided host dq[..., D:].zero_().
     dq = torch.empty_like(q)
-    stream = torch.cuda.current_stream()
+    stream = torch.cuda.current_stream(q.device)
     # The validated resident-R128 one-workgroup dQ is the exact Pro-cr0 default.
     # Explicit false values retain the accepted two-workgroup path as a strict A/B
     # control; parse the setting only for this shape so every other dispatch is unchanged.
@@ -5249,5 +5252,6 @@ def sparse_mla_bwd_flydsl(
         _dsc[0](*_p1args)
         _dsc[1](*_p2args)
 
-    dkv = dkv.unsqueeze(1)
+    if not kv_was_2d:
+        dkv = dkv.unsqueeze(1)
     return dq, dkv, d_sink

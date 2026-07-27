@@ -38,8 +38,15 @@ def _function_node(path: Path, name: str) -> ast.FunctionDef | ast.AsyncFunction
 
 
 def _function_ast_sha256(path: Path, name: str) -> str:
+    function = _function_node(path, name)
+    # Python 3.12 adds an empty ``type_params`` field to function/class ASTs.
+    # Drop version-only empty metadata so the provenance hash remains identical
+    # to the Python 3.10 KernelForge receipt.
+    for node in ast.walk(function):
+        if hasattr(node, "type_params") and not node.type_params:
+            del node.type_params
     normalized = ast.dump(
-        _function_node(path, name),
+        function,
         annotate_fields=True,
         include_attributes=False,
     )
@@ -90,7 +97,16 @@ def test_training_api_requires_explicit_canonical_topk_opt_in() -> None:
         (BWD, "sparse_mla_bwd_flydsl"),
     ):
         function = _function_node(path, entry_point)
-        assert [argument.arg for argument in function.args.kwonlyargs] == ["canonical_topk"]
-        assert [ast.literal_eval(default) for default in function.args.kw_defaults] == [False]
+        expected_keywords = ["canonical_topk"]
+        if entry_point == "sparse_mla_fwd_flydsl":
+            expected_keywords.append("assume_bounded_scores")
+        assert [argument.arg for argument in function.args.kwonlyargs] == expected_keywords
+        assert [ast.literal_eval(default) for default in function.args.kw_defaults] == [False] * len(expected_keywords)
         source = ast.unparse(function)
         assert "attn_sink is required by the DSV4 training contract" in source
+        assert "q.device.index != torch.cuda.current_device()" in source
+        assert "torch.cuda.current_stream(q.device)" in source
+        if entry_point == "sparse_mla_fwd_flydsl":
+            assert "fast_path = bool(canonical_topk and assume_bounded_scores)" in source
+        else:
+            assert "if not kv_was_2d:" in source

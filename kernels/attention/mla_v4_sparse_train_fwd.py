@@ -905,6 +905,7 @@ def sparse_mla_fwd_flydsl(
     scale=None,
     *,
     canonical_topk=False,
+    assume_bounded_scores=False,
 ):
     """Run DSV4 sparse-MLA training forward on gfx950.
 
@@ -912,15 +913,20 @@ def sparse_mla_fwd_flydsl(
     and ``topk_indices`` is padded INT32 with ``-1`` marking invalid rows.
     ``attn_sink`` is required by the validated training contract.
 
-    Set ``canonical_topk=True`` only for DSV4's canonical SWA/cr128 index
-    construction. It enables closed-form paths that intentionally do not read
-    every index value. The default uses the generic gather path.
+    Set ``canonical_topk=True`` only for DSV4's canonical index construction;
+    it enables closed-form SWA/cr128 paths that intentionally do not read every
+    index value. ``assume_bounded_scores=True`` additionally enables the faster
+    fixed-max cr4 softmax used by the release benchmark; leave it false unless
+    the model contract keeps later scores within the FP32 exponential range
+    relative to the first pair.
     """
     if not torch.cuda.is_available() or q.device.type != "cuda":
         raise RuntimeError("DSV4 sparse-MLA training requires a ROCm GPU")
     arch = torch.cuda.get_device_properties(q.device).gcnArchName.split(":", 1)[0]
     if arch != "gfx950":
         raise RuntimeError(f"DSV4 sparse-MLA training requires gfx950, got {arch}")
+    if q.device.index != torch.cuda.current_device():
+        raise ValueError("q must be on the current CUDA device; set the process device before calling")
     if q.dtype != torch.bfloat16 or kv.dtype != torch.bfloat16:
         raise TypeError("q and kv must use torch.bfloat16")
     if topk_indices.dtype != torch.int32:
@@ -943,6 +949,8 @@ def sparse_mla_fwd_flydsl(
         raise ValueError(f"expected D=512 and q/kv d_qk=576, got D={D}, q={d_qk}, kv={kv.shape}")
     if num_heads not in (64, 128):
         raise ValueError(f"num_heads must be 64 (Flash) or 128 (Pro), got {num_heads}")
+    if assume_bounded_scores and not canonical_topk:
+        raise ValueError("assume_bounded_scores requires canonical_topk=True")
     if topk_indices.shape[0] != total_tokens:
         raise ValueError("topk_indices token dimension must match q")
     if topk % 32:
@@ -1023,6 +1031,10 @@ def sparse_mla_fwd_flydsl(
     # pstore: 4-buffer parity prestore pipeline overlapping the exposed KV reg->LDS
     # store with the PV MFMA drain. flash cr4 (bh=64 non-banded, store-heaviest) only.
     pstore = not banded and bh == 64
+    # The fixed-max shortcut is only valid for the canonical DSV4 index
+    # construction. Generic indices can place the row maximum after the first
+    # pair, so they must retain the stable running-max softmax update.
+    fast_path = bool(canonical_topk and assume_bounded_scores)
     fn = _get_fwd(
         topk,
         scale,
@@ -1042,8 +1054,9 @@ def sparse_mla_fwd_flydsl(
         dyn_pool=dyn_pool,
         bh=bh,
         pstore=pstore,
+        fast_path=fast_path,
     )
-    stream = torch.cuda.current_stream()
+    stream = torch.cuda.current_stream(q.device)
     args = (q, kv, topk_indices, sink, o, lse, int(total_tokens), int(num_heads), int(num_kv), stream)
     ckey = (
         "c",
@@ -1065,6 +1078,7 @@ def sparse_mla_fwd_flydsl(
         dyn_pool,
         bh,
         pstore,
+        fast_path,
     )
     compiled = _FWD_CACHE.get(ckey)
     if compiled is None:
