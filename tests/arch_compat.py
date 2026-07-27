@@ -19,6 +19,7 @@ CDNA_ONLY_TESTS = frozenset(
         "test_quant.py",
         "test_allreduce.py",  # custom_all_reduce requires CDNA (gfx9xx)
         "test_mla_v4_sparse_decode.py",  # gfx950-only MFMA sparse decode
+        "test_mla_v4_sparse_train.py",  # gfx950-only MFMA sparse training
     }
 )
 
