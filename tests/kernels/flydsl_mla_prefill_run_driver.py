@@ -11,11 +11,20 @@ writes out [S,128,512] directly — NO decode split-KV metadata, so no O(S²) bu
 Correctness oracle = torch SDPA is_causal on the SAME data cast to fp32 (q,k=576 / v=512, MQA 128:1),
 memory-safe even at large S. Prints:
     correctness -> "SNR: <db> dB" + "allclose: <bool>" + "max_diff: <cos_diff>"
+                   + "rel_l2:" + "worst_head_rel_l2:" + "max_rel_peak:"
     performance -> "median_ms: <device p50>"
 
-Do not edit this driver — it is the frozen scoring harness. The kernel under development is
-kernels/attention/mla_prefill_qtiled*.py; it starts as a stub (raises) so correctness fails until
-the fellow lands a real kernel.
+This driver is the scoring harness: treat it as frozen except for defects in the scoring itself.
+The kernel under development is kernels/attention/mla_prefill_qtiled*.py; it starts as a stub
+(raises) so correctness fails until the fellow lands a real kernel.
+
+2026-07-28 — the correctness gate was repaired. It previously passed on `cos < 3e-2`, which is
+|x-y|^2/(|x|^2+|y|^2), i.e. ~24.5% relative L2 error, and being a whole-tensor aggregate it
+diluted localized errors: at NH=128, up to 7 heads could be entirely garbage and still pass
+(verified numerically). `--shape 8192` also silently fell back to S=512 because the parser only
+accepted key=value, and `performance` runs returned 0 regardless of the correctness result.
+Timing behaviour and every pre-existing output key are unchanged, so prior medians remain
+comparable; `allclose` is now strictly harder to satisfy, by design.
 """
 from __future__ import annotations
 
@@ -36,6 +45,15 @@ torch.set_default_device("cuda")
 from kernels.attention.mla_prefill_qtiled import flydsl_mla_prefill  # noqa: E402
 
 QK, VD, NH, NKV, PAGE = 576, 512, 128, 1, 1
+
+# Correctness gate. bf16 MLA prefill against an fp32 SDPA oracle measures
+# rel_l2 ~2.1e-3 at S=8192/16384, so these leave ~5x margin while still
+# rejecting a broken kernel. The per-head bound is the load-bearing one: the
+# legacy whole-tensor score dilutes localized corruption, and at NH=128 up to
+# 7 heads could be entirely garbage and still land under its 3e-2 threshold.
+TOL_REL_L2 = 1e-2
+TOL_HEAD_REL_L2 = 2e-2
+TOL_MAX_REL_PEAK = 5e-2
 _CACHE_DIR = os.environ.get("FLYDSL_RUNTIME_CACHE_DIR", "/root/.flydsl")
 _KERNEL = os.environ.get("FORGE_FLYDSL_KERNEL",
                          os.path.join(_REPO, "kernels/attention/mla_prefill_qtiled.py"))
@@ -65,14 +83,37 @@ def _clear_cache_if_changed():
         pass
 
 
+_SHAPE_KEYS = ("seqlen", "S", "ctx_len", "ctx")
+
+
 def _parse_shape(s):
-    S = 512
-    if s and s != "default":
-        for part in s.split(","):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                if k.strip() in ("seqlen", "S", "ctx_len", "ctx"):
-                    S = int(v)
+    """Parse `--shape seqlen=8192`. Rejects anything unrecognized.
+
+    This used to fall through to S=512 for any input it did not understand, so
+    `--shape 8192` silently validated a 16x smaller shape than requested and
+    only disclosed it in a trailing annotation on the max_diff line.
+    """
+    if not s or s == "default":
+        return 512
+    S = None
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise SystemExit(f"--shape: expected key=value (one of {'/'.join(_SHAPE_KEYS)}=N), got {part!r}")
+        k, v = part.split("=", 1)
+        k = k.strip()
+        if k not in _SHAPE_KEYS:
+            raise SystemExit(f"--shape: unknown key {k!r}; expected one of {'/'.join(_SHAPE_KEYS)}")
+        try:
+            S = int(v)
+        except ValueError:
+            raise SystemExit(f"--shape: {k}= must be an integer, got {v!r}") from None
+        if S <= 0:
+            raise SystemExit(f"--shape: {k}= must be positive, got {S}")
+    if S is None:
+        raise SystemExit(f"--shape: no sequence length given; expected one of {'/'.join(_SHAPE_KEYS)}=N")
     return S
 
 
@@ -174,14 +215,34 @@ def main():
 
     ref = _oracle(q, kv, kvi, npg, sm, S, causal, head_chunk=args.head_chunk)
     x, y = ref.double(), out.double()
+    # Legacy whole-tensor score, kept under its original key so historical
+    # campaign records stay comparable. Algebraically |x-y|^2 / (|x|^2 + |y|^2),
+    # i.e. a squared relative error -- despite the max_diff name it is not a max.
     cos = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
+    ref_norm = x.norm().item()
     noise = (x - y).norm().item()
-    snr = 20.0 * math.log10(x.norm().item() / max(noise, 1e-20)) if noise > 0 else 999.0
-    passed = cos < 3e-2
+    snr = 20.0 * math.log10(ref_norm / max(noise, 1e-20)) if noise > 0 else 999.0
+
+    # Gating metrics. Per-head so localized corruption cannot average away, and
+    # a peak-relative element bound to catch a single badly wrong output.
+    rel_l2 = noise / max(ref_norm, 1e-20)
+    head_sq = (x - y).pow(2).sum(dim=(0, 2))
+    head_ref_sq = x.pow(2).sum(dim=(0, 2))
+    head_rel = (head_sq / head_ref_sq.clamp_min(1e-40)).sqrt()
+    worst_head = head_rel.max().item()
+    worst_head_idx = int(head_rel.argmax().item())
+    max_rel_peak = (x - y).abs().max().item() / max(x.abs().max().item(), 1e-20)
+
+    passed = rel_l2 < TOL_REL_L2 and worst_head < TOL_HEAD_REL_L2 and max_rel_peak < TOL_MAX_REL_PEAK
     print(f"SNR: {snr:.2f} dB")
     print(f"allclose: {passed}")
     print(f"max_diff: {cos:.3e}  (ref={args.ref}, S={S})")
-    return 0 if (passed or action == "performance") else 1
+    print(f"rel_l2: {rel_l2:.3e}  (tol {TOL_REL_L2:.0e})")
+    print(f"worst_head_rel_l2: {worst_head:.3e}  (head {worst_head_idx}, tol {TOL_HEAD_REL_L2:.0e})")
+    print(f"max_rel_peak: {max_rel_peak:.3e}  (tol {TOL_MAX_REL_PEAK:.0e})")
+    # A performance run used to return 0 regardless of `passed`, so timing
+    # numbers could be banked from a run whose output was wrong.
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
