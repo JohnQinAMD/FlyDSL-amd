@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-28T15:54:20Z",
+ "updated": "2026-07-28T15:58:39Z",
  "repo": "JohnQinAMD/FlyDSL-amd",
  "runs": [
+  {
+   "run_id": 30375965347,
+   "pr": null,
+   "commit": "16c2dced9b8ce5ad684f7fbdaef1e73cab6b1027",
+   "branch": "main",
+   "event": "push",
+   "title": "Merge pull request #3 from JohnQinAMD/fix/mla-prefill-correctness-gate",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30375965347",
+   "created_at": "2026-07-28T15:58:08Z",
+   "updated_at": "2026-07-28T15:58:24Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 30375537769,
    "pr": 3,
@@ -25,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "Merge pull request #2 from JohnQinAMD/codex/dsv4-training-sparse-mla",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30305172521",
    "created_at": "2026-07-27T21:02:41Z",
-   "updated_at": "2026-07-27T21:03:26Z",
+   "updated_at": "2026-07-28T15:58:10Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
