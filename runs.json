@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T21:37:07Z",
+ "updated": "2026-08-04T22:29:28Z",
  "repo": "JohnQinAMD/FlyDSL-amd",
  "runs": [
+  {
+   "run_id": 30953262917,
+   "pr": null,
+   "commit": "a43c694b1ea2891bdab8645418b33cf5089a7758",
+   "branch": "main",
+   "event": "push",
+   "title": "Merge pull request #4 from JohnQinAMD/codex/refactor-v4-sparse-decode",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30953262917",
+   "created_at": "2026-08-04T21:39:35Z",
+   "updated_at": "2026-08-04T21:40:20Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 30953067798,
    "pr": 4,
@@ -10,17 +25,17 @@
    "branch": "codex/refactor-v4-sparse-decode",
    "event": "pull_request",
    "title": "Refactor DSV4 sparse decode kernel",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/JohnQinAMD/FlyDSL-amd/actions/runs/30953067798",
    "created_at": "2026-08-04T21:36:45Z",
-   "updated_at": "2026-08-04T21:36:53Z",
+   "updated_at": "2026-08-04T21:37:28Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
   {
    "run_id": 30952117596,
-   "pr": 4,
+   "pr": null,
    "commit": "bb360d63e635b3737b2b87d4a32971bba20daef9",
    "branch": "codex/refactor-v4-sparse-decode",
    "event": "pull_request",
@@ -35,7 +50,7 @@
   },
   {
    "run_id": 30951867912,
-   "pr": 4,
+   "pr": null,
    "commit": "990f2799e9c49624c6b84cd81b256b0faae3c244",
    "branch": "codex/refactor-v4-sparse-decode",
    "event": "pull_request",
@@ -50,7 +65,7 @@
   },
   {
    "run_id": 30951730514,
-   "pr": 4,
+   "pr": null,
    "commit": "90cdda3f896b391a201bb2fff8c8941a972c3534",
    "branch": "codex/refactor-v4-sparse-decode",
    "event": "pull_request",
