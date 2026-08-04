@@ -41,6 +41,17 @@ SCALE_BYTES = SCALE_TILES * 2
 AITER_ASM_SYMBOL = "mla_a8w8_qh64_qseqlen1_gqaratio64_nm"
 AITER_ASM_CODE_OBJECT = f"{AITER_ASM_SYMBOL}.co"
 ROOT = Path(__file__).resolve().parents[2]
+FLYDSL_ARTIFACT_SOURCES = (
+    ROOT / "kernels" / "attention" / "_mla_v4_sparse_decode_common.py",
+    ROOT / "kernels" / "attention" / "_mla_v4_sparse_decode_kernel.py",
+)
+
+
+def _flydsl_artifact_sha256() -> str:
+    digest = hashlib.sha256()
+    for source in sorted(FLYDSL_ARTIFACT_SOURCES):
+        digest.update(source.read_bytes())
+    return digest.hexdigest()
 
 
 @dataclass
@@ -94,7 +105,9 @@ def _load_runtime(*, require_aiter: bool) -> V4Runtime:
     identity = module.FORGE_REGISTRATION_IDENTITY
     assert identity["mode"] == "selected"
     assert identity["variant"] == "m16s536"
-    assert identity["registered_heavy_count"] == 1
+    kernel_global = identity["kernel_global"]
+    assert kernel_global in module.FORGE_HEAVY_KERNEL_GLOBALS
+    assert callable(getattr(module, kernel_global))
 
     aiter = None
     if require_aiter:
@@ -217,15 +230,10 @@ def _launch_flydsl(runtime: V4Runtime, case: V4Case, *, output: Any | None = Non
         case.q_rope,
         case.kv_packed,
         case.kv_rope,
-        case.qo_indptr,
         case.kv_indptr,
         case.kv_indices,
         case.sink,
-        case.split_indptr,
         case.fly_output if output is None else output,
-        case.fly_logits,
-        case.fly_lse,
-        NUM_SPLITS,
         float(SOFTMAX_SCALE),
         num_sequences=BATCH,
         stream=runtime.torch.cuda.current_stream(case.q_packed.device),
@@ -656,8 +664,8 @@ def _driver_benchmark() -> None:
     )
 
     result = _paired_benchmark(runtime, case, reference)
-    source_path = Path(runtime.flydsl_module.__file__).resolve()
-    result["flydsl_source_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    result["flydsl_source_sha256"] = _flydsl_artifact_sha256()
+    result["flydsl_source_files"] = [str(source.relative_to(ROOT)) for source in sorted(FLYDSL_ARTIFACT_SOURCES)]
     result["registration"] = dict(runtime.flydsl_module.FORGE_REGISTRATION_IDENTITY)
     result["gpu_arch"] = "gfx950"
     result["gpu_name"] = runtime.torch.cuda.get_device_name()
