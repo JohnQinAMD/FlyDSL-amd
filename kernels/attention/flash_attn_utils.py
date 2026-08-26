@@ -1892,6 +1892,7 @@ def _make_dualwave_swp_fp8_traits(
     num_heads,
     num_kv_heads,
     head_dim,
+    rescale_threshold,
     causal=True,
     waves_per_eu=2,
     daz=True,
@@ -2042,9 +2043,7 @@ def _make_dualwave_swp_fp8_traits(
         URV_DC_AXIS0_BF=snrpt_bf * vls_bf,
         URV_DC_AXIS1_BF=32,
         URV_I5_BF=d128_bf,
-        # 6, not bf16's 8: sub_m below can only lift P by 8.807 - THRESHOLD, and
-        # at 8 that leaves 0.8, too little to keep the tail out of e4m3's flush.
-        DUALWAVE_SWP_RESCALE_THRESHOLD=6.0,
+        DUALWAVE_SWP_RESCALE_THRESHOLD=rescale_threshold,
         SCHED_MFMA_MASK=0x008,
         SCHED_VALU_MASK=0x002,
         SCHED_EXP_MASK=0x400,

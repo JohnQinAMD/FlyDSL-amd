@@ -4302,7 +4302,7 @@ def test_lse_fully_masked_rows():
     _assert_lse_matches(lse, ref, _ATOL_BF16)
 
 
-@pytest.mark.parametrize("lazy_rescale, atol", [(True, 0.12), (False, 0.05)])
+@pytest.mark.parametrize("lazy_rescale, atol", [(True, 0.06), (False, 0.05)])
 @pytest.mark.parametrize("S", [1024, 12288])
 @pytest.mark.parametrize("k_scale", [1.0, 200.0])
 def test_fp8_softmax_normalises(S, k_scale, lazy_rescale, atol):
@@ -4318,7 +4318,8 @@ def test_fp8_softmax_normalises(S, k_scale, lazy_rescale, atol):
     ``2**RESCALE_THRESHOLD`` and can use only the remainder, so it improves
     without becoming exact; the eager path rebases every tile and gets all of
     it. Before the fix these reached 0.64 and 0.50 respectively. The lazy bound
-    also pins fp8's threshold: at bf16's 8 the widest case here reaches 0.23.
+    also pins the per-length threshold: pinned at 6 the widest case here reaches
+    0.09, and at bf16's 8 it reaches 0.23, both past the 0.06 allowed.
     """
     if get_rocm_arch() != "gfx950":
         pytest.skip("dense fp8 attention is gfx950-only")
@@ -4836,6 +4837,22 @@ def test_fp8_split_result_survives_a_non_current_stream(monkeypatch):
     torch.cuda.synchronize()
 
     torch.testing.assert_close(got.float(), ref.float(), rtol=0, atol=0)
+
+
+def test_fp8_rescale_threshold_drops_past_the_long_sequence_bound():
+    """fp8 picks its rescale threshold from the KV length.
+
+    Below the bound 6 and 4 are equally accurate and 6 is cheaper; above it the
+    running max spans enough tiles that 4's extra two log2 units of P lift are
+    worth its ~0.3%. The kernel is not specialised on S, so this widens the
+    build cache to two variants -- keep it two.
+    """
+    f = flash_attn_interface._fp8_rescale_threshold
+    assert f(1024) == 6.0
+    assert f(flash_attn_interface._FP8_LONG_SEQ) == 6.0
+    assert f(flash_attn_interface._FP8_LONG_SEQ + 1) == 4.0
+    assert f(131072) == 4.0
+    assert set(f(s) for s in (1, 1024, 4096, 4097, 8192, 131072)) == {6.0, 4.0}
 
 
 @_requires_gfx950
