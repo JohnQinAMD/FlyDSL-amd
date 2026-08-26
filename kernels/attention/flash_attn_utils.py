@@ -1864,6 +1864,7 @@ class DualwaveSwpFp8Traits:
             self.WAVES_PER_EU,
             self.DAZ,
             self.DUALWAVE_SWP_LAZY_RESCALE,
+            self.DUALWAVE_SWP_RESCALE_THRESHOLD,
             self.DUALWAVE_SWP_SETPRIO,
             self.DUALWAVE_SWP_DEBUG_LAZY_COUNTS,
             self.DUALWAVE_SWP_ENABLE_STAGGER,
