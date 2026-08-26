@@ -2042,7 +2042,9 @@ def _make_dualwave_swp_fp8_traits(
         URV_DC_AXIS0_BF=snrpt_bf * vls_bf,
         URV_DC_AXIS1_BF=32,
         URV_I5_BF=d128_bf,
-        DUALWAVE_SWP_RESCALE_THRESHOLD=8.0,
+        # 6, not bf16's 8: sub_m below can only lift P by 8.807 - THRESHOLD, and
+        # at 8 that leaves 0.8, too little to keep the tail out of e4m3's flush.
+        DUALWAVE_SWP_RESCALE_THRESHOLD=6.0,
         SCHED_MFMA_MASK=0x008,
         SCHED_VALU_MASK=0x002,
         SCHED_EXP_MASK=0x400,
@@ -4413,7 +4415,7 @@ class DualwaveFp8KernelContext:
         self.c_neg_inf = fx.Float32(float("-inf"))
         self.c_neg_floor = fx.Float32(-3.0e38)
         self.c_zero_f = fx.Float32(0.0)
-        self.c_eight_f = fx.Float32(traits.DUALWAVE_SWP_RESCALE_THRESHOLD)
+        self.c_rescale_thr_f = fx.Float32(traits.DUALWAVE_SWP_RESCALE_THRESHOLD)
         self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
 
     def init_runtime_indices(self):
@@ -5203,7 +5205,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         def _run(v_o, m_row, l_row, m_tile_max, v_p):
             m_diff = m_tile_max - m_row
             m_diff_scaled = m_diff * self.c_logit_scale
-            below = fx.Float32(m_diff_scaled) <= self.c_eight_f
+            below = fx.Float32(m_diff_scaled) <= self.c_rescale_thr_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
             all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
@@ -5233,7 +5235,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         def _run(v_o, m_row, l_row, m_tile_max):
             m_diff = m_tile_max - m_row
             m_diff_scaled = m_diff * self.c_logit_scale
-            below = fx.Float32(m_diff_scaled) <= self.c_eight_f
+            below = fx.Float32(m_diff_scaled) <= self.c_rescale_thr_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
             all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
